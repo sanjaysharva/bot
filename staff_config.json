@@ -1,0 +1,55 @@
+{
+  "1504458538876145724": {
+    "roles": {
+      "admin": 1529513964894158909,
+      "general_manager": 1529513967876309156,
+      "hr_manager": 1529513970828972162,
+      "sales_manager": 1529513975253831872,
+      "sales_representative": 1529513977246122077,
+      "marketing_manager": 1529513980136132718,
+      "marketing_specialist": 1529513983076208663,
+      "support_lead": 1529513986066743498,
+      "support_agent": 1529848739911700530,
+      "devops_engineer": 1529848742117638214,
+      "developer": 1529848744567242864,
+      "moderator": 1529848747192877137
+    },
+    "department_channels": {
+      "Human Resources": 1529849884549709884
+    },
+    "staff": {
+      "1241332182870659134": {
+        "role": "HR Manager",
+        "department": "Human Resources",
+        "personal_channel_id": 1529849889519829147,
+        "department_channel_id": 1529849884549709884,
+        "added_at": "2026-07-23T13:57:17.180798+00:00",
+        "added_by": "SR | Scraxy"
+      },
+      "1246455180933861388": {
+        "role_id": 1504458538888462349,
+        "channel_id": 1532749825676677362,
+        "added_at": "2026-07-31T14:00:36.937871+00:00"
+      }
+    },
+    "target": "50",
+    "total": 50,
+    "completed": 0,
+    "staff_role_id": 1504458538888462349,
+    "created_roles": {},
+    "base_target": 45,
+    "dynamic_target": 113,
+    "daily_report_channel_id": null,
+    "daily_report_hour": 9,
+    "counts": {
+      "2026-07-31": {
+        "1246455180933861388": 13
+      }
+    },
+    "reports": {},
+    "last_reminder_date": null,
+    "online_time": {
+      "2026-07-31": {}
+    }
+  }
+}

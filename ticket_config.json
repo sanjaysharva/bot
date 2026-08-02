@@ -1,0 +1,23 @@
+{
+  "1504458538876145724": {
+    "orders": {},
+    "blacklist": [],
+    "whitelist": [],
+    "strikes": {},
+    "incidents": [],
+    "audits": [],
+    "kpi": {
+      "orders": 0,
+      "tickets": 0,
+      "refunds": 0,
+      "incidents": 0,
+      "feedback": 0
+    },
+    "meetings": [],
+    "vacations": {},
+    "shifts": {},
+    "status_page": "https://status.nexora.cloud",
+    "panel_message_id": 1529513376068403291,
+    "panel_channel_id": 1504458541526683806
+  }
+}

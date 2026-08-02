@@ -1,0 +1,169 @@
+{
+  "1504458538876145724": {
+    "orders": {},
+    "blacklist": [],
+    "whitelist": [],
+    "strikes": {},
+    "incidents": [],
+    "audits": [
+      {
+        "time": "2026-07-18T02:53:03.506364+00:00",
+        "action": "user_server_panel_created",
+        "user": "leo07357",
+        "target": "Practice | Brotz",
+        "details": "identifier:fcdafac2"
+      },
+      {
+        "time": "2026-07-18T02:53:22.109381+00:00",
+        "action": "user_server_command",
+        "user": "leo07357",
+        "target": "Practice | Brotz",
+        "details": "op fraxy"
+      },
+      {
+        "time": "2026-07-18T03:10:54.991741+00:00",
+        "action": "user_server_panel_created",
+        "user": "ahmed_32206",
+        "target": "Practice | Brotz",
+        "details": "identifier:fcdafac2"
+      },
+      {
+        "time": "2026-07-18T03:12:20.094623+00:00",
+        "action": "server_start",
+        "user": "ahmed_32206",
+        "target": "Practice | Brotz",
+        "details": "channel:1527958326309294090"
+      },
+      {
+        "time": "2026-07-18T03:12:36.893617+00:00",
+        "action": "user_server_command",
+        "user": "ahmed_32206",
+        "target": "Practice | Brotz",
+        "details": "/tps"
+      },
+      {
+        "time": "2026-07-18T03:14:31.509686+00:00",
+        "action": "user_server_command",
+        "user": "ahmed_32206",
+        "target": "Practice | Brotz",
+        "details": "Version"
+      },
+      {
+        "time": "2026-07-22T15:42:25.444895+00:00",
+        "action": "staff_role_created",
+        "user": "Nexora Bot",
+        "target": "Admin",
+        "details": ""
+      },
+      {
+        "time": "2026-07-22T15:42:26.017942+00:00",
+        "action": "staff_role_created",
+        "user": "Nexora Bot",
+        "target": "General Manager",
+        "details": ""
+      },
+      {
+        "time": "2026-07-22T15:42:27.224941+00:00",
+        "action": "staff_role_created",
+        "user": "Nexora Bot",
+        "target": "HR Manager",
+        "details": ""
+      },
+      {
+        "time": "2026-07-22T15:42:27.779948+00:00",
+        "action": "staff_role_created",
+        "user": "Nexora Bot",
+        "target": "Sales Manager",
+        "details": ""
+      },
+      {
+        "time": "2026-07-22T15:42:28.376947+00:00",
+        "action": "staff_role_created",
+        "user": "Nexora Bot",
+        "target": "Sales Representative",
+        "details": ""
+      },
+      {
+        "time": "2026-07-22T15:42:29.126944+00:00",
+        "action": "staff_role_created",
+        "user": "Nexora Bot",
+        "target": "Marketing Manager",
+        "details": ""
+      },
+      {
+        "time": "2026-07-22T15:42:29.810949+00:00",
+        "action": "staff_role_created",
+        "user": "Nexora Bot",
+        "target": "Marketing Specialist",
+        "details": ""
+      },
+      {
+        "time": "2026-07-22T15:42:30.533941+00:00",
+        "action": "staff_role_created",
+        "user": "Nexora Bot",
+        "target": "Support Lead",
+        "details": ""
+      },
+      {
+        "time": "2026-07-23T13:52:43.082504+00:00",
+        "action": "staff_role_created",
+        "user": "Nexora Bot",
+        "target": "Support Agent",
+        "details": ""
+      },
+      {
+        "time": "2026-07-23T13:52:43.686982+00:00",
+        "action": "staff_role_created",
+        "user": "Nexora Bot",
+        "target": "DevOps Engineer",
+        "details": ""
+      },
+      {
+        "time": "2026-07-23T13:52:44.274640+00:00",
+        "action": "staff_role_created",
+        "user": "Nexora Bot",
+        "target": "Developer",
+        "details": ""
+      },
+      {
+        "time": "2026-07-23T13:52:44.881608+00:00",
+        "action": "staff_role_created",
+        "user": "Nexora Bot",
+        "target": "Moderator",
+        "details": ""
+      },
+      {
+        "time": "2026-07-23T13:57:17.197801+00:00",
+        "action": "staff_added",
+        "user": "leo07357",
+        "target": "_volxire_",
+        "details": "HR Manager"
+      },
+      {
+        "time": "2026-07-31T13:59:56.229491+00:00",
+        "action": "staff_role_set",
+        "user": "leo07357",
+        "target": "\ud83d\udc9a \u2502 \u3067\u30fbNexora Staff\u300d",
+        "details": ""
+      },
+      {
+        "time": "2026-07-31T14:00:37.962860+00:00",
+        "action": "staff_member_added",
+        "user": "leo07357",
+        "target": "leo07357",
+        "details": "<#1532749825676677362>"
+      }
+    ],
+    "kpi": {
+      "orders": 0,
+      "tickets": 0,
+      "refunds": 0,
+      "incidents": 0,
+      "feedback": 0
+    },
+    "meetings": [],
+    "vacations": {},
+    "shifts": {},
+    "status_page": "https://status.nexora.cloud"
+  }
+}
