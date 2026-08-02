@@ -282,7 +282,7 @@ async def _create_staff_workspace(
             "Servers Invaded :\n"
             "```"
         ),
-        GREEN,
+        Ax55FF55,
     )
 
 Extra Notes 📝 :
