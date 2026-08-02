@@ -1,7 +1,7 @@
 """
 cogs/receipt.py — Nexora Cloud
-Generate a professional invoice-style receipt with dropdown plans, optional addons,
-fixed plan pricing, and addon rates. Customer is selected via Discord user picker.
+Generate a professional invoice-style receipt with manually entered plan,
+pricing, addons, customer, and delivery details.
 """
 
 import io
@@ -16,28 +16,6 @@ from discord import app_commands
 from discord.ext import commands
 from PIL import Image, ImageDraw, ImageFont
 
-
-PLAN_PRICES = {
-    "Starter Cloud": 5.00,
-    "Pro Cloud": 12.00,
-    "Business Cloud": 25.00,
-    "Enterprise Cloud": 60.00,
-    "Custom Cloud": 0.00,
-}
-
-ADDON_PRICES = {
-    "Extra RAM +2GB": 3.00,
-    "Extra RAM +4GB": 6.00,
-    "Extra CPU +1 vCPU": 5.00,
-    "Extra CPU +2 vCPU": 10.00,
-    "Extra SSD +50GB": 4.00,
-    "Extra SSD +100GB": 8.00,
-    "Daily Backups": 2.00,
-    "DDoS Protection": 3.00,
-}
-
-PLAN_CHOICES = [app_commands.Choice(name=k, value=k) for k in PLAN_PRICES]
-ADDON_CHOICES = [app_commands.Choice(name=k, value=k) for k in ADDON_PRICES]
 
 DELIVERY_CHOICES = [
     app_commands.Choice(name="Admin DM only", value="admin_dm"),
@@ -111,12 +89,14 @@ def generate_invoice(
     customer: str,
     cashier: str,
     items: list,
+    price: float | None = None,
     discount: float = 0.0,
-    tax_rate: float = 0.0,
+    real_price: float = 0.0,
+    final_price: float = 0.0,
     status: str = "PAID",
 ) -> io.BytesIO:
-    """Render a Nexora invoice with multiple line items."""
-    W, H = 560, 760
+    """Render a Nexora invoice with manually entered pricing."""
+    W, H = 560, 840
     WHITE = (255, 255, 255)
     BLACK = (33, 33, 33)
     GREY = (100, 100, 100)
@@ -193,15 +173,13 @@ def generate_invoice(
         d.text((W - pad - right_w, y), right, font=font, fill=color)
         y += 26
 
-    total_row("Subtotal", f"${subtotal:,.2f}")
+    total_row("Price", f"${(subtotal if price is None else price):,.2f}")
+    total_row("Real Price", f"${real_price:,.2f}")
     total_row("Discount", f"-${discount:,.2f}")
-    total_row(f"Tax ({tax_rate}%)", f"${subtotal * (tax_rate / 100):,.2f}")
-
-    total = subtotal - discount + (subtotal * (tax_rate / 100))
     y += 6
     d.line([(pad, y), (W - pad, y)], fill=BLACK, width=2)
     y += 14
-    total_row("TOTAL", f"${total:,.2f}", bold=True)
+    total_row("FINAL PRICE", f"${final_price:,.2f}", bold=True)
     y += 10
 
     barcode_img = _make_barcode(invoice_id)
@@ -226,16 +204,19 @@ def generate_invoice(
     return buf
 
 
-def _items_from_plan_addons(plan: app_commands.Choice[str], addon_choices: list) -> list:
-    items = [(plan.value, 1, PLAN_PRICES[plan.value])]
-    for addon in addon_choices:
-        if addon:
-            items.append((addon.value, 1, ADDON_PRICES[addon.value]))
-    return items
-
-
-def _summary_embed(invoice_id: str, customer: discord.Member, cashier: str, plan: str, addons: list, total: float, status: str) -> discord.Embed:
-    addon_text = "\n".join(f"• {a.value} — ${ADDON_PRICES[a.value]:,.2f}" for a in addons if a) or "None"
+def _summary_embed(
+    invoice_id: str,
+    customer: discord.Member,
+    cashier: str,
+    plan: str,
+    price: float,
+    discount: float,
+    real_price: float,
+    final_price: float,
+    addons: str,
+    delivery_type: str,
+    status: str,
+) -> discord.Embed:
     embed = discord.Embed(
         title=f"Nexora Invoice — {invoice_id}",
         description="A professional receipt has been generated for the selected customer.",
@@ -244,9 +225,13 @@ def _summary_embed(invoice_id: str, customer: discord.Member, cashier: str, plan
     )
     embed.add_field(name="Customer", value=customer.mention, inline=True)
     embed.add_field(name="Cashier", value=cashier, inline=True)
-    embed.add_field(name="Plan", value=f"{plan}\n`${PLAN_PRICES[plan]:,.2f}`", inline=True)
-    embed.add_field(name="Addons", value=addon_text, inline=True)
-    embed.add_field(name="Total", value=f"**${total:,.2f}**", inline=True)
+    embed.add_field(name="Plan", value=plan, inline=True)
+    embed.add_field(name="Price", value=f"${price:,.2f}", inline=True)
+    embed.add_field(name="Discount", value=f"${discount:,.2f}", inline=True)
+    embed.add_field(name="Real Price", value=f"${real_price:,.2f}", inline=True)
+    embed.add_field(name="Final Price", value=f"**${final_price:,.2f}**", inline=True)
+    embed.add_field(name="Addons", value=addons or "None", inline=False)
+    embed.add_field(name="Delivery Type", value=delivery_type, inline=True)
     embed.add_field(name="Status", value=status, inline=True)
     embed.set_footer(text="Nexora Cloud — Premium Cloud Hosting")
     embed.set_thumbnail(url=customer.display_avatar.url)
@@ -254,69 +239,88 @@ def _summary_embed(invoice_id: str, customer: discord.Member, cashier: str, plan
 
 
 class Receipt(commands.Cog):
-    """Receipt / invoice generation with dropdown plans and addons."""
+    """Receipt / invoice generation with manually entered pricing."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="receipt", description="Generate a Nexora invoice with fixed plans and optional addons.")
+    @app_commands.command(name="receipt", description="Generate a Nexora receipt with custom pricing and delivery.")
     @app_commands.describe(
         customer="Select the customer user",
-        plan="Fixed-price hosting plan",
-        delivery="Where to deliver the receipt",
-        addon_1="Optional addon",
-        addon_2="Optional addon",
-        addon_3="Optional addon",
-        addon_4="Optional addon",
-        addon_5="Optional addon",
-        discount="Discount amount in dollars (default 0)",
-        tax_rate="Tax percentage (default 0)",
-        invoice_id="Custom invoice ID — auto-generated if blank",
+        plan="Plan name or description",
+        price="Listed plan price in dollars",
+        discount="Discount amount in dollars",
+        invoice_id="Invoice ID shown on the receipt",
+        final_price="Final amount charged in dollars",
+        real_price="Real price before discount in dollars",
+        addons="Addon names or details, separated by commas",
+        delivery_type="Where to deliver the receipt",
         status="Payment status (default PAID)",
-        cashier="Cashier/admin name (default: your display name)",
     )
-    @app_commands.choices(plan=PLAN_CHOICES, addon_1=ADDON_CHOICES, addon_2=ADDON_CHOICES, addon_3=ADDON_CHOICES, addon_4=ADDON_CHOICES, addon_5=ADDON_CHOICES, delivery=DELIVERY_CHOICES)
+    @app_commands.choices(delivery_type=DELIVERY_CHOICES)
     @app_commands.checks.has_permissions(administrator=True)
     async def receipt(
         self,
         interaction: discord.Interaction,
         customer: discord.Member,
-        plan: app_commands.Choice[str],
-        delivery: app_commands.Choice[str] = None,
-        addon_1: app_commands.Choice[str] = None,
-        addon_2: app_commands.Choice[str] = None,
-        addon_3: app_commands.Choice[str] = None,
-        addon_4: app_commands.Choice[str] = None,
-        addon_5: app_commands.Choice[str] = None,
-        discount: float = 0.0,
-        tax_rate: float = 0.0,
-        invoice_id: str = "",
+        plan: str,
+        price: float,
+        discount: float,
+        invoice_id: str,
+        final_price: float,
+        real_price: float,
+        addons: str = "None",
+        delivery_type: app_commands.Choice[str] = None,
         status: str = "PAID",
-        cashier: str = "",
     ):
         await interaction.response.defer(ephemeral=True)
 
-        inv_id = invoice_id.strip() or f"INV-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{int(datetime.now(timezone.utc).timestamp()) % 10000:04d}"
-        cashier_name = cashier.strip() or interaction.user.display_name
-        delivery_value = delivery.value if delivery else "admin_channel"
-        addons = [a for a in (addon_1, addon_2, addon_3, addon_4, addon_5) if a]
+        inv_id = invoice_id.strip()
+        cashier_name = interaction.user.display_name
+        delivery_value = delivery_type.value if delivery_type else "admin_channel"
+        delivery_label = next(
+            (choice.name for choice in DELIVERY_CHOICES if choice.value == delivery_value),
+            "Admin DM + Channel",
+        )
 
-        items = _items_from_plan_addons(plan, addons)
-        subtotal = sum(qty * price for _, qty, price in items)
-        total = subtotal - discount + (subtotal * (tax_rate / 100))
+        if not inv_id:
+            return await interaction.followup.send("Invoice ID cannot be empty.", ephemeral=True)
+        if not plan.strip():
+            return await interaction.followup.send("Plan cannot be empty.", ephemeral=True)
+        if min(price, discount, final_price, real_price) < 0:
+            return await interaction.followup.send("Price values cannot be negative.", ephemeral=True)
+
+        addon_text = addons.strip() or "None"
+        items = [(plan.strip(), 1, price)]
+        if addon_text.lower() not in {"none", "no", "n/a"}:
+            items.append((f"Addons: {addon_text}", 1, max(0.0, real_price - price)))
 
         buf = generate_invoice(
             invoice_id=inv_id,
             customer=customer.display_name,
             cashier=cashier_name,
             items=items,
+            price=price,
             discount=discount,
-            tax_rate=tax_rate,
+            real_price=real_price,
+            final_price=final_price,
             status=status,
         )
         file = discord.File(buf, filename=f"{inv_id}.png")
 
-        summary = _summary_embed(inv_id, customer, cashier_name, plan.value, addons, total, status)
+        summary = _summary_embed(
+            inv_id,
+            customer,
+            cashier_name,
+            plan.strip(),
+            price,
+            discount,
+            real_price,
+            final_price,
+            addon_text,
+            delivery_label,
+            status,
+        )
 
         def fresh_file():
             buf.seek(0)
@@ -334,26 +338,26 @@ class Receipt(commands.Cog):
 
         if delivery_value == "admin_dm":
             await interaction.user.send(embed=summary, file=fresh_file())
-            await interaction.followup.send(f"Receipt sent to your DM. Invoice `{inv_id}` — Total: **${total:,.2f}**", ephemeral=True)
+            await interaction.followup.send(f"Receipt sent to your DM. Invoice `{inv_id}` — Final price: **${final_price:,.2f}**", ephemeral=True)
         elif delivery_value == "channel":
             await post_in_channel(interaction.channel)
-            await interaction.followup.send(f"Receipt posted in this channel. Invoice `{inv_id}` — Total: **${total:,.2f}**", ephemeral=True)
+            await interaction.followup.send(f"Receipt posted in this channel. Invoice `{inv_id}` — Final price: **${final_price:,.2f}**", ephemeral=True)
         elif delivery_value == "customer_dm":
             await send_to_user(customer)
-            await interaction.followup.send(f"Receipt sent to {customer.mention} via DM. Invoice `{inv_id}` — Total: **${total:,.2f}**", ephemeral=True)
+            await interaction.followup.send(f"Receipt sent to {customer.mention} via DM. Invoice `{inv_id}` — Final price: **${final_price:,.2f}**", ephemeral=True)
         elif delivery_value == "admin_channel":
             await interaction.user.send(embed=summary, file=fresh_file())
             await post_in_channel(interaction.channel)
-            await interaction.followup.send(f"Receipt sent to your DM and posted in this channel. Invoice `{inv_id}` — Total: **${total:,.2f}**", ephemeral=True)
+            await interaction.followup.send(f"Receipt sent to your DM and posted in this channel. Invoice `{inv_id}` — Final price: **${final_price:,.2f}**", ephemeral=True)
         elif delivery_value == "all":
             await send_to_user(customer)
             await interaction.user.send(embed=summary, file=fresh_file())
             await post_in_channel(interaction.channel)
-            await interaction.followup.send(f"Receipt sent to customer, admin DM, and channel. Invoice `{inv_id}` — Total: **${total:,.2f}**", ephemeral=True)
+            await interaction.followup.send(f"Receipt sent to customer, admin DM, and channel. Invoice `{inv_id}` — Final price: **${final_price:,.2f}**", ephemeral=True)
         else:
             await interaction.user.send(embed=summary, file=fresh_file())
             await post_in_channel(interaction.channel)
-            await interaction.followup.send(f"Receipt sent to admin and channel. Invoice `{inv_id}` — Total: **${total:,.2f}**", ephemeral=True)
+            await interaction.followup.send(f"Receipt sent to admin and channel. Invoice `{inv_id}` — Final price: **${final_price:,.2f}**", ephemeral=True)
 
     @receipt.error
     async def receipt_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
