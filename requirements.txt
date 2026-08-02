@@ -2,3 +2,4 @@ discord.py==2.3.2
 discord==2.3.2
 aiohttp>=3.12.15
 python-dotenv>=1.1.1
+barcode==i.0.4
