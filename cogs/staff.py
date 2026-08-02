@@ -278,11 +278,10 @@ async def _create_staff_workspace(
             "Current Role :\n"
             "Time Active :\n"
             "Clients Daily :\n"
-            "Clients Daily :\n"
             "Servers Invaded :\n"
             "```"
         ),
-        Ax55FF55,
+        0x55FF55,
     )
 
 Extra Notes 📝 :
