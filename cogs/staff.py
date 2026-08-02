@@ -274,13 +274,15 @@ async def _create_staff_workspace(
             "Use it for internal updates, blockers, and work coordination.\n\n"
             "**Daily report format**\n"
             "```text\n"
-            "Tasks completed:\n"
-            "Blockers / issues:\n"
-            "Orders or tickets handled:\n"
-            "Notes for tomorrow:\n"
+            "Dc Username : \n"
+            "Current Role :\n"
+            "Time Active :\n"
+            "Clients Daily : \n"
+            "Servers Invaded : \n\n"
+            "Extra Notes 📝 :"
             "```"
         ),
-        CYAN,
+        0x55FF55,
     )
     welcome.set_thumbnail(url=member.display_avatar.url)
     await channel.send(embed=welcome)
