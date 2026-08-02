@@ -1,380 +1,322 @@
 """
-cogs/receipt.py — Nexora Cloud
-Generate a professional invoice-style receipt with manually entered plan,
-pricing, addons, customer, and delivery details.
+cogs/managment.py — Nexora Cloud
+
+Staff performance reporting. The filename is kept for compatibility with the
+existing project layout; this cog intentionally owns only !performance.
 """
 
-import io
-import os
-import re
 from datetime import datetime, timezone
 
-import barcode
 import discord
-from barcode.writer import ImageWriter
-from discord import app_commands
-from discord.ext import commands
-from PIL import Image, ImageDraw, ImageFont
+from discord.ext import commands, tasks
+
+from .staff import get_scfg, set_scfg
+from ._shared import SUCCESS, WARNING, DANGER
 
 
-DELIVERY_CHOICES = [
-    app_commands.Choice(name="Admin DM only", value="admin_dm"),
-    app_commands.Choice(name="Post in this channel", value="channel"),
-    app_commands.Choice(name="Customer DM only", value="customer_dm"),
-    app_commands.Choice(name="Admin DM + Channel", value="admin_channel"),
-    app_commands.Choice(name="Customer + Channel + Admin", value="all"),
-]
-
-ACCENT_EMBED = 0x2563EB
-SUCCESS_EMBED = 0x10B981
-GOLD_EMBED = 0xF59E0B
+ACTIVE_STATUSES = {
+    discord.Status.online,
+    discord.Status.idle,
+    discord.Status.dnd,
+}
 
 
-def _load_fonts():
-    """Load a clean sans-serif font with a safe runtime fallback."""
-    candidates = [
-        "C:/Windows/fonts/arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/arial.ttf",
-        "arial.ttf",
-    ]
-    sizes = {"h1": 32, "h2": 22, "reg": 17, "sm": 14, "xs": 12}
+def _today() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
 
-    # A path may exist but still be unreadable by Pillow in a minimal
-    # container, so try every candidate instead of trusting its existence.
-    for path in candidates:
-        if not os.path.isfile(path):
+
+def _staff_role(guild: discord.Guild, cfg: dict) -> discord.Role | None:
+    role_id = cfg.get("staff_role_id")
+    return guild.get_role(int(role_id)) if role_id else None
+
+
+def _active_now(status: discord.Status) -> bool:
+    return status in ACTIVE_STATUSES
+
+
+def _parse_timestamp(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _flush_online_sessions(cfg: dict, date_key: str, now: datetime) -> None:
+    """Persist elapsed time without closing sessions that are still active."""
+    entries = cfg.setdefault("online_time", {}).setdefault(date_key, {})
+    for entry in entries.values():
+        active_since = _parse_timestamp(entry.get("active_since"))
+        if not active_since:
             continue
-        try:
-            return {
-                name: ImageFont.truetype(path, size)
-                for name, size in sizes.items()
-            }
-        except (OSError, IOError):
+        elapsed = max(0, int((now - active_since).total_seconds()))
+        entry["total_seconds"] = int(entry.get("total_seconds", 0)) + elapsed
+        entry["active_since"] = now.isoformat()
+
+
+def _online_seconds(cfg: dict, user_id: int, date_key: str, now: datetime) -> int:
+    entry = cfg.get("online_time", {}).get(date_key, {}).get(str(user_id), {})
+    total = int(entry.get("total_seconds", 0))
+    active_since = _parse_timestamp(entry.get("active_since"))
+    if active_since:
+        total += max(0, int((now - active_since).total_seconds()))
+    return total
+
+
+def _format_duration(seconds: int) -> str:
+    hours, remainder = divmod(max(0, seconds), 3600)
+    minutes = remainder // 60
+    return f"{hours}h {minutes:02d}m"
+
+
+def _invasion_counts(cfg: dict, user_id: int, date_key: str) -> tuple[int, int]:
+    accepted = 0
+    ejected = 0
+    for record in cfg.get("invasions", []):
+        if str(record.get("reviewer_id")) != str(user_id):
             continue
-
-    # Pillow's built-in font is always available when no system font exists.
-    fallback = ImageFont.load_default()
-    return {name: fallback for name in sizes}
-
-
-def _draw_hexagon(draw, cx, cy, radius, color, outline=None):
-    import math
-    points = []
-    for i in range(6):
-        angle = math.radians(60 * i - 30)
-        points.append((cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
-    draw.polygon(points, fill=color, outline=outline)
+        timestamp = _parse_timestamp(record.get("timestamp"))
+        if timestamp and timestamp.date().isoformat() != date_key:
+            continue
+        if record.get("decision") == "accept":
+            accepted += 1
+        elif record.get("decision") == "eject":
+            ejected += 1
+    return accepted, ejected
 
 
-def _make_barcode(data: str) -> Image.Image:
-    data = re.sub(r"[^A-Za-z0-9\-]", "", data) or "NEXORA"
-    writer = ImageWriter()
-    writer.set_options({
-        "write_text": False,
-        "module_height": 12,
-        "quiet_zone": 2,
-        "module_width": 0.25,
-    })
-    code = barcode.get("code128", data, writer=writer)
-    buf = io.BytesIO()
-    code.write(buf)
-    buf.seek(0)
-    img = Image.open(buf).convert("RGB")
-    padded = Image.new("RGB", (img.width, img.height + 10), (255, 255, 255))
-    padded.paste(img, (0, 5))
-    return padded
+def _metrics(cfg: dict, member: discord.Member, date_key: str, now: datetime) -> dict:
+    target = max(1, int(cfg.get("dynamic_target", 113)))
+    messages = int(cfg.get("counts", {}).get(date_key, {}).get(str(member.id), 0))
+    accepted, ejected = _invasion_counts(cfg, member.id, date_key)
+    online_seconds = _online_seconds(cfg, member.id, date_key, now)
+
+    target_points = min(50.0, (messages / target) * 50)
+    invasion_points = min(30.0, (accepted * 10) + (ejected * 5))
+    online_points = min(20.0, (online_seconds / (8 * 3600)) * 20)
+    score = round(target_points + invasion_points + online_points, 1)
+
+    return {
+        "member": member,
+        "messages": messages,
+        "target": target,
+        "target_percent": min(100, round((messages / target) * 100)),
+        "accepted": accepted,
+        "ejected": ejected,
+        "online_seconds": online_seconds,
+        "target_points": round(target_points, 1),
+        "invasion_points": round(invasion_points, 1),
+        "online_points": round(online_points, 1),
+        "score": score,
+    }
 
 
-def generate_invoice(
-    invoice_id: str,
-    customer: str,
-    cashier: str,
-    items: list,
-    price: float | None = None,
-    discount: float = 0.0,
-    real_price: float = 0.0,
-    final_price: float = 0.0,
-    status: str = "PAID",
-) -> io.BytesIO:
-    """Render a Nexora invoice with manually entered pricing."""
-    W, H = 560, 840
-    WHITE = (255, 255, 255)
-    BLACK = (33, 33, 33)
-    GREY = (100, 100, 100)
-    BLUE = (66, 133, 244)
-    DASH = (180, 180, 180)
-
-    img = Image.new("RGB", (W, H), WHITE)
-    d = ImageDraw.Draw(img)
-    fn = _load_fonts()
-    pad = 50
-
-    # Header
-    hex_y = 70
-    hex_r = 28
-    _draw_hexagon(d, pad + hex_r, hex_y, hex_r, BLUE)
-    d.text((pad + hex_r - 7, hex_y - 12), "N", font=fn["h2"], fill=WHITE)
-    d.text((pad + 70, hex_y - 18), "NEXORA", font=fn["h1"], fill=BLACK)
-    d.text((pad + 70, hex_y + 16), "Cloud Hosting  Pakistan", font=fn["sm"], fill=GREY)
-    d.text((pad + 70, hex_y + 34), "nexora.host   billing@nexora.host", font=fn["xs"], fill=GREY)
-
-    y = 140
-
-    def dashed_line(yy):
-        x = pad
-        while x < W - pad:
-            d.line([(x, yy), (x + 4, yy)], fill=DASH, width=1)
-            x += 8
-
-    dashed_line(y)
-    y += 22
-
-    def detail_row(left, right):
-        nonlocal y
-        d.text((pad, y), left, font=fn["reg"], fill=GREY)
-        d.text((W - pad - d.textlength(right, font=fn["reg"]), y), right, font=fn["reg"], fill=BLACK)
-        y += 24
-
-    detail_row("Invoice", invoice_id)
-    detail_row("Date", datetime.now(timezone.utc).strftime("%a, %b %d, %Y,  %H:%M:%S %Z"))
-    detail_row("Cashier", cashier)
-    detail_row("Customer", customer)
-    detail_row("Status", status)
-
-    y += 10
-    dashed_line(y)
-    y += 22
-
-    # Table header
-    d.text((pad, y), "ITEM", font=fn["sm"], fill=GREY)
-    d.text((W // 2 - 10, y), "QTY", font=fn["sm"], fill=GREY)
-    d.text((W - pad - d.textlength("AMOUNT", font=fn["sm"]), y), "AMOUNT", font=fn["sm"], fill=GREY)
-    y += 22
-    dashed_line(y)
-    y += 16
-
-    subtotal = 0.0
-    for item, qty, unit_price in items:
-        line_total = unit_price * qty
-        subtotal += line_total
-        d.text((pad, y), item[:40], font=fn["reg"], fill=BLACK)
-        d.text((W // 2 - 10, y), str(qty), font=fn["reg"], fill=BLACK)
-        amount_w = d.textlength(f"${line_total:,.2f}", font=fn["reg"])
-        d.text((W - pad - amount_w, y), f"${line_total:,.2f}", font=fn["reg"], fill=BLACK)
-        y += 34
-
-    dashed_line(y)
-    y += 18
-
-    def total_row(left, right, bold=False, color=BLACK):
-        nonlocal y
-        font = fn["h2"] if bold else fn["reg"]
-        d.text((pad, y), left, font=font, fill=color)
-        right_w = d.textlength(right, font=font)
-        d.text((W - pad - right_w, y), right, font=font, fill=color)
-        y += 26
-
-    total_row("Price", f"${(subtotal if price is None else price):,.2f}")
-    total_row("Real Price", f"${real_price:,.2f}")
-    total_row("Discount", f"-${discount:,.2f}")
-    y += 6
-    d.line([(pad, y), (W - pad, y)], fill=BLACK, width=2)
-    y += 14
-    total_row("FINAL PRICE", f"${final_price:,.2f}", bold=True)
-    y += 10
-
-    barcode_img = _make_barcode(invoice_id)
-    bw, bh = barcode_img.size
-    target_w = W - 2 * pad
-    barcode_img = barcode_img.resize((target_w, int(bh * target_w / bw)), Image.LANCZOS)
-    img.paste(barcode_img, (pad, y))
-    y += barcode_img.height + 10
-
-    barcode_text = invoice_id
-    btw = d.textlength(barcode_text, font=fn["reg"])
-    d.text(((W - btw) // 2, y), barcode_text, font=fn["reg"], fill=BLACK)
-    y += 28
-
-    d.text((pad, y), "Thank you for choosing NEXORA", font=fn["sm"], fill=GREY)
-    y += 18
-    d.text((pad, y), "Keep this slip for warranty & support", font=fn["xs"], fill=GREY)
-
-    buf = io.BytesIO()
-    img.save(buf, "PNG")
-    buf.seek(0)
-    return buf
-
-
-def _summary_embed(
-    invoice_id: str,
-    customer: discord.Member,
-    cashier: str,
-    plan: str,
-    price: float,
-    discount: float,
-    real_price: float,
-    final_price: float,
-    addons: str,
-    delivery_type: str,
-    status: str,
-) -> discord.Embed:
-    embed = discord.Embed(
-        title=f"Nexora Invoice — {invoice_id}",
-        description="A professional receipt has been generated for the selected customer.",
-        color=ACCENT_EMBED,
-        timestamp=datetime.now(timezone.utc),
-    )
-    embed.add_field(name="Customer", value=customer.mention, inline=True)
-    embed.add_field(name="Cashier", value=cashier, inline=True)
-    embed.add_field(name="Plan", value=plan, inline=True)
-    embed.add_field(name="Price", value=f"${price:,.2f}", inline=True)
-    embed.add_field(name="Discount", value=f"${discount:,.2f}", inline=True)
-    embed.add_field(name="Real Price", value=f"${real_price:,.2f}", inline=True)
-    embed.add_field(name="Final Price", value=f"**${final_price:,.2f}**", inline=True)
-    embed.add_field(name="Addons", value=addons or "None", inline=False)
-    embed.add_field(name="Delivery Type", value=delivery_type, inline=True)
-    embed.add_field(name="Status", value=status, inline=True)
-    embed.set_footer(text="Nexora Cloud — Premium Cloud Hosting")
-    embed.set_thumbnail(url=customer.display_avatar.url)
-    return embed
-
-
-class Receipt(commands.Cog):
-    """Receipt / invoice generation with manually entered pricing."""
-
+class Management(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.online_flush_task.start()
 
-    @app_commands.command(name="receipt", description="Generate a Nexora receipt with custom pricing and delivery.")
-    @app_commands.describe(
-        customer="Select the customer user",
-        plan="Plan name or description",
-        price="Listed plan price in dollars",
-        discount="Discount amount in dollars",
-        invoice_id="Invoice ID shown on the receipt",
-        final_price="Final amount charged in dollars",
-        real_price="Real price before discount in dollars",
-        addons="Addon names or details, separated by commas",
-        delivery_type="Where to deliver the receipt",
-        status="Payment status (default PAID)",
-    )
-    @app_commands.choices(delivery_type=DELIVERY_CHOICES)
-    @app_commands.checks.has_permissions(administrator=True)
-    async def receipt(
+    def cog_unload(self):
+        self.online_flush_task.cancel()
+
+    async def _update_presence(
         self,
-        interaction: discord.Interaction,
-        customer: discord.Member,
-        plan: str,
-        price: float,
-        discount: float,
-        invoice_id: str,
-        final_price: float,
-        real_price: float,
-        addons: str = "None",
-        delivery_type: app_commands.Choice[str] = None,
-        status: str = "PAID",
+        member: discord.Member,
+        status: discord.Status,
+    ) -> None:
+        if member.bot or not member.guild:
+            return
+        cfg = get_scfg(member.guild.id)
+        role = _staff_role(member.guild, cfg)
+        if not role or role not in member.roles:
+            return
+
+        date_key = _today()
+        now = datetime.now(timezone.utc)
+        entries = cfg.setdefault("online_time", {}).setdefault(date_key, {})
+        entry = entries.setdefault(str(member.id), {"total_seconds": 0, "active_since": None})
+        currently_active = bool(entry.get("active_since"))
+        should_be_active = _active_now(status)
+
+        if should_be_active and not currently_active:
+            entry["active_since"] = now.isoformat()
+        elif not should_be_active and currently_active:
+            active_since = _parse_timestamp(entry.get("active_since"))
+            if active_since:
+                entry["total_seconds"] = int(entry.get("total_seconds", 0)) + max(
+                    0, int((now - active_since).total_seconds())
+                )
+            entry["active_since"] = None
+        set_scfg(member.guild.id, cfg)
+
+    @commands.Cog.listener()
+    async def on_presence_update(self, before: discord.Member, after: discord.Member):
+        if before.status != after.status:
+            await self._update_presence(after, after.status)
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Start sessions for staff who were already active at bot startup."""
+        for guild in self.bot.guilds:
+            cfg = get_scfg(guild.id)
+            role = _staff_role(guild, cfg)
+            if not role:
+                continue
+            now = datetime.now(timezone.utc)
+            date_key = now.date().isoformat()
+            entries = cfg.setdefault("online_time", {}).setdefault(date_key, {})
+            changed = False
+            for member in role.members:
+                if member.bot or not _active_now(member.status):
+                    continue
+                entry = entries.setdefault(
+                    str(member.id),
+                    {"total_seconds": 0, "active_since": None},
+                )
+                if not entry.get("active_since"):
+                    entry["active_since"] = now.isoformat()
+                    changed = True
+            if changed:
+                set_scfg(guild.id, cfg)
+
+    @tasks.loop(minutes=1)
+    async def online_flush_task(self):
+        now = datetime.now(timezone.utc)
+        date_key = now.date().isoformat()
+        for guild in self.bot.guilds:
+            cfg = get_scfg(guild.id)
+            if cfg.get("online_time", {}).get(date_key):
+                _flush_online_sessions(cfg, date_key, now)
+                set_scfg(guild.id, cfg)
+
+    @online_flush_task.before_loop
+    async def before_online_flush_task(self):
+        await self.bot.wait_until_ready()
+
+    @commands.command(
+        name="performance",
+        help="Show the staff leaderboard or one staff member. Usage: !performance [@user]",
+    )
+    @commands.has_permissions(manage_guild=True)
+    async def performance(
+        self,
+        ctx: commands.Context,
+        member: discord.Member = None,
     ):
-        await interaction.response.defer(ephemeral=True)
+        if not ctx.guild:
+            return await ctx.send("This command must be used inside a server.")
 
-        inv_id = invoice_id.strip()
-        cashier_name = interaction.user.display_name
-        delivery_value = delivery_type.value if delivery_type else "admin_channel"
-        delivery_label = next(
-            (choice.name for choice in DELIVERY_CHOICES if choice.value == delivery_value),
-            "Admin DM + Channel",
+        cfg = get_scfg(ctx.guild.id)
+        role = _staff_role(ctx.guild, cfg)
+        if not role:
+            return await ctx.send(
+                embed=discord.Embed(
+                    title="Staff Role Required",
+                    description="Configure the normal staff role first with `!staff_role @role`.",
+                    color=WARNING,
+                )
+            )
+
+        now = datetime.now(timezone.utc)
+        date_key = _today()
+        _flush_online_sessions(cfg, date_key, now)
+        set_scfg(ctx.guild.id, cfg)
+
+        members = [item for item in role.members if not item.bot]
+        if member:
+            if member.bot or member not in members:
+                return await ctx.send(
+                    embed=discord.Embed(
+                        title="Not a Staff Member",
+                        description=f"{member.mention} is not in the configured staff role {role.mention}.",
+                        color=DANGER,
+                    )
+                )
+            stats = _metrics(cfg, member, date_key, now)
+            embed = discord.Embed(
+                title=f"Performance — {member.display_name}",
+                description=(
+                    f"Daily performance breakdown for {date_key}.\n"
+                    "Score: **50 target + 30 invasion + 20 online points**."
+                ),
+                color=SUCCESS,
+                timestamp=now,
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.add_field(
+                name="Target Progress",
+                value=(
+                    f"**{stats['messages']} / {stats['target']} messages** "
+                    f"({stats['target_percent']}%)\n"
+                    f"Points: **{stats['target_points']} / 50**"
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="Invasion Decisions",
+                value=(
+                    f"Accepted: **{stats['accepted']}**\n"
+                    f"Ejected: **{stats['ejected']}**\n"
+                    f"Points: **{stats['invasion_points']} / 30**"
+                ),
+                inline=True,
+            )
+            embed.add_field(
+                name="Online Time",
+                value=(
+                    f"**{_format_duration(stats['online_seconds'])}**\n"
+                    f"Points: **{stats['online_points']} / 20**"
+                ),
+                inline=True,
+            )
+            embed.add_field(name="Total Score", value=f"**{stats['score']} / 100**", inline=False)
+            embed.set_footer(text=f"Nexora Cloud • Staff Performance • {role.name}")
+            return await ctx.send(embed=embed)
+
+        leaderboard = sorted(
+            (_metrics(cfg, item, date_key, now) for item in members),
+            key=lambda item: (-item["score"], -item["messages"], item["member"].display_name.casefold()),
         )
+        if not leaderboard:
+            return await ctx.send(
+                embed=discord.Embed(
+                    title="Staff Performance Leaderboard",
+                    description=f"No members are assigned to {role.mention}.",
+                    color=WARNING,
+                )
+            )
 
-        if not inv_id:
-            return await interaction.followup.send("Invoice ID cannot be empty.", ephemeral=True)
-        if not plan.strip():
-            return await interaction.followup.send("Plan cannot be empty.", ephemeral=True)
-        if min(price, discount, final_price, real_price) < 0:
-            return await interaction.followup.send("Price values cannot be negative.", ephemeral=True)
+        lines = []
+        for index, stats in enumerate(leaderboard[:25], start=1):
+            member = stats["member"]
+            lines.append(
+                f"`#{index}` {member.mention} — **{stats['score']} / 100**\n"
+                f" Target: {stats['messages']}/{stats['target']} • "
+                f"Invades: {stats['accepted']} accepted / {stats['ejected']} ejected • "
+                f"Online: {_format_duration(stats['online_seconds'])}"
+            )
 
-        addon_text = addons.strip() or "None"
-        items = [(plan.strip(), 1, price)]
-        if addon_text.lower() not in {"none", "no", "n/a"}:
-            items.append((f"Addons: {addon_text}", 1, max(0.0, real_price - price)))
-
-        buf = generate_invoice(
-            invoice_id=inv_id,
-            customer=customer.display_name,
-            cashier=cashier_name,
-            items=items,
-            price=price,
-            discount=discount,
-            real_price=real_price,
-            final_price=final_price,
-            status=status,
+        embed = discord.Embed(
+            title="Staff Performance Leaderboard",
+            description=(
+                f"Daily ranking for **{date_key}** • Role: {role.mention}\n"
+                "Score weights: target **50%**, invasions **30%**, online time **20%**.\n\n"
+                + "\n".join(lines)
+            ),
+            color=SUCCESS,
+            timestamp=now,
         )
-        file = discord.File(buf, filename=f"{inv_id}.png")
+        embed.set_footer(text="Use !performance @user for an individual breakdown.")
+        await ctx.send(embed=embed)
 
-        summary = _summary_embed(
-            inv_id,
-            customer,
-            cashier_name,
-            plan.strip(),
-            price,
-            discount,
-            real_price,
-            final_price,
-            addon_text,
-            delivery_label,
-            status,
-        )
-
-        def fresh_file():
-            buf.seek(0)
-            return discord.File(buf, filename=f"{inv_id}.png")
-
-        async def send_to_user(user: discord.User):
-            try:
-                await user.send(embed=summary, file=fresh_file())
-            except discord.Forbidden:
-                await interaction.followup.send(f"Could not DM {user.mention}. Receipt posted here instead.", ephemeral=True)
-                await interaction.channel.send(embed=summary, file=fresh_file())
-
-        async def post_in_channel(channel: discord.TextChannel):
-            await channel.send(embed=summary, file=fresh_file())
-
-        if delivery_value == "admin_dm":
-            await interaction.user.send(embed=summary, file=fresh_file())
-            await interaction.followup.send(f"Receipt sent to your DM. Invoice `{inv_id}` — Final price: **${final_price:,.2f}**", ephemeral=True)
-        elif delivery_value == "channel":
-            await post_in_channel(interaction.channel)
-            await interaction.followup.send(f"Receipt posted in this channel. Invoice `{inv_id}` — Final price: **${final_price:,.2f}**", ephemeral=True)
-        elif delivery_value == "customer_dm":
-            await send_to_user(customer)
-            await interaction.followup.send(f"Receipt sent to {customer.mention} via DM. Invoice `{inv_id}` — Final price: **${final_price:,.2f}**", ephemeral=True)
-        elif delivery_value == "admin_channel":
-            await interaction.user.send(embed=summary, file=fresh_file())
-            await post_in_channel(interaction.channel)
-            await interaction.followup.send(f"Receipt sent to your DM and posted in this channel. Invoice `{inv_id}` — Final price: **${final_price:,.2f}**", ephemeral=True)
-        elif delivery_value == "all":
-            await send_to_user(customer)
-            await interaction.user.send(embed=summary, file=fresh_file())
-            await post_in_channel(interaction.channel)
-            await interaction.followup.send(f"Receipt sent to customer, admin DM, and channel. Invoice `{inv_id}` — Final price: **${final_price:,.2f}**", ephemeral=True)
+    async def cog_command_error(self, ctx: commands.Context, error: commands.CommandError):
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.send("Error: You need Manage Server permission to use `!performance`.")
+        elif isinstance(error, commands.BadArgument):
+            await ctx.send("Error: Mention a valid server member.")
         else:
-            await interaction.user.send(embed=summary, file=fresh_file())
-            await post_in_channel(interaction.channel)
-            await interaction.followup.send(f"Receipt sent to admin and channel. Invoice `{inv_id}` — Final price: **${final_price:,.2f}**", ephemeral=True)
-
-    @receipt.error
-    async def receipt_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        msg = (
-            "Error: You need Administrator permission."
-            if isinstance(error, app_commands.MissingPermissions)
-            else f"Error: `{error}`"
-        )
-        if interaction.response.is_done():
-            await interaction.followup.send(msg, ephemeral=True)
-        else:
-            await interaction.response.send_message(msg, ephemeral=True)
+            await ctx.send(f"Performance error: `{error}`")
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(Receipt(bot))
+    await bot.add_cog(Management(bot))
