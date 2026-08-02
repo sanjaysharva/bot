@@ -2,7 +2,6 @@ discord.py==2.3.2
 discord==2.3.2
 aiohttp>=3.12.15
 python-dotenv>=1.1.1
-wdiscord.py>=2.3.2
 Pillow>=10.0.0
 python-barcode>=0.15.1
-aiohttp>=3.9.0
+
