@@ -283,8 +283,8 @@ async def _create_staff_workspace(
         ),
         0x55FF55,
     )
-
-Extra Notes:
+    
+    Extra Notes:
     welcome.set_thumbnail(url=member.display_avatar.url)
     await channel.send(embed=welcome)
     return channel
