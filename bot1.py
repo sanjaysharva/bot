@@ -8,7 +8,7 @@ import os
 #   Hacker-themed startup dashboard with ANSI art, skull, and system metrics
 # ───────────────────────────────────────────────────────────────────────────────
 
-TOKEN = os.environ.get(TOKEN)
+TOKEN = os.environ.get("TOKEN")
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
