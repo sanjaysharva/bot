@@ -1,322 +1,237 @@
 """
-cogs/managment.py — Nexora Cloud
-
-Staff performance reporting. The filename is kept for compatibility with the
-existing project layout; this cog intentionally owns only !performance.
+cogs/receipt.py — Nexora Cloud
+Create receipt records around a bill image supplied by an administrator.
+The bot does not generate or modify the bill image.
 """
 
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import discord
-from discord.ext import commands, tasks
-
-from .staff import get_scfg, set_scfg
-from ._shared import SUCCESS, WARNING, DANGER
+from discord import app_commands
+from discord.ext import commands
 
 
-ACTIVE_STATUSES = {
-    discord.Status.online,
-    discord.Status.idle,
-    discord.Status.dnd,
-}
+DELIVERY_CHOICES = [
+    app_commands.Choice(name="Admin DM only", value="admin_dm"),
+    app_commands.Choice(name="Post in this channel", value="channel"),
+    app_commands.Choice(name="Customer DM only", value="customer_dm"),
+    app_commands.Choice(name="Admin DM + Channel", value="admin_channel"),
+    app_commands.Choice(name="Customer + Channel + Admin", value="all"),
+]
+
+ACCENT_EMBED = 0x2563EB
+WARNING_EMBED = 0xF59E0B
 
 
-def _today() -> str:
-    return datetime.now(timezone.utc).date().isoformat()
+def _valid_http_url(value: str) -> bool:
+    parsed = urlparse(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
-def _staff_role(guild: discord.Guild, cfg: dict) -> discord.Role | None:
-    role_id = cfg.get("staff_role_id")
-    return guild.get_role(int(role_id)) if role_id else None
+def _attachment_is_image(attachment: discord.Attachment) -> bool:
+    if attachment.content_type:
+        return attachment.content_type.startswith("image/")
+    return attachment.filename.lower().endswith(
+        (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+    )
 
 
-def _active_now(status: discord.Status) -> bool:
-    return status in ACTIVE_STATUSES
+def _summary_embed(
+    invoice_id: str,
+    customer: discord.Member,
+    cashier: str,
+    plan: str,
+    price: float,
+    discount: float,
+    real_price: float,
+    final_price: float,
+    addons: str,
+    delivery_type: str,
+    status: str,
+    bill_image_url: str,
+) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"Nexora Receipt — {invoice_id}",
+        description="Receipt details supplied by the administrator. The bill image was not generated or modified by Nexora.",
+        color=ACCENT_EMBED,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.add_field(name="Customer", value=customer.mention, inline=True)
+    embed.add_field(name="Cashier", value=cashier, inline=True)
+    embed.add_field(name="Plan", value=plan, inline=True)
+    embed.add_field(name="Price", value=f"${price:,.2f}", inline=True)
+    embed.add_field(name="Discount", value=f"${discount:,.2f}", inline=True)
+    embed.add_field(name="Real Price", value=f"${real_price:,.2f}", inline=True)
+    embed.add_field(name="Final Price", value=f"**${final_price:,.2f}**", inline=True)
+    embed.add_field(name="Addons", value=addons or "None", inline=False)
+    embed.add_field(name="Delivery Type", value=delivery_type, inline=True)
+    embed.add_field(name="Status", value=status, inline=True)
+    embed.set_image(url=bill_image_url)
+    embed.set_footer(text="Nexora Cloud — Supplied Bill Image")
+    embed.set_thumbnail(url=customer.display_avatar.url)
+    return embed
 
 
-def _parse_timestamp(value: str) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(value)
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-    except (TypeError, ValueError):
-        return None
+class Receipt(commands.Cog):
+    """Receipt records that use an administrator-supplied bill image."""
 
-
-def _flush_online_sessions(cfg: dict, date_key: str, now: datetime) -> None:
-    """Persist elapsed time without closing sessions that are still active."""
-    entries = cfg.setdefault("online_time", {}).setdefault(date_key, {})
-    for entry in entries.values():
-        active_since = _parse_timestamp(entry.get("active_since"))
-        if not active_since:
-            continue
-        elapsed = max(0, int((now - active_since).total_seconds()))
-        entry["total_seconds"] = int(entry.get("total_seconds", 0)) + elapsed
-        entry["active_since"] = now.isoformat()
-
-
-def _online_seconds(cfg: dict, user_id: int, date_key: str, now: datetime) -> int:
-    entry = cfg.get("online_time", {}).get(date_key, {}).get(str(user_id), {})
-    total = int(entry.get("total_seconds", 0))
-    active_since = _parse_timestamp(entry.get("active_since"))
-    if active_since:
-        total += max(0, int((now - active_since).total_seconds()))
-    return total
-
-
-def _format_duration(seconds: int) -> str:
-    hours, remainder = divmod(max(0, seconds), 3600)
-    minutes = remainder // 60
-    return f"{hours}h {minutes:02d}m"
-
-
-def _invasion_counts(cfg: dict, user_id: int, date_key: str) -> tuple[int, int]:
-    accepted = 0
-    ejected = 0
-    for record in cfg.get("invasions", []):
-        if str(record.get("reviewer_id")) != str(user_id):
-            continue
-        timestamp = _parse_timestamp(record.get("timestamp"))
-        if timestamp and timestamp.date().isoformat() != date_key:
-            continue
-        if record.get("decision") == "accept":
-            accepted += 1
-        elif record.get("decision") == "eject":
-            ejected += 1
-    return accepted, ejected
-
-
-def _metrics(cfg: dict, member: discord.Member, date_key: str, now: datetime) -> dict:
-    target = max(1, int(cfg.get("dynamic_target", 113)))
-    messages = int(cfg.get("counts", {}).get(date_key, {}).get(str(member.id), 0))
-    accepted, ejected = _invasion_counts(cfg, member.id, date_key)
-    online_seconds = _online_seconds(cfg, member.id, date_key, now)
-
-    target_points = min(50.0, (messages / target) * 50)
-    invasion_points = min(30.0, (accepted * 10) + (ejected * 5))
-    online_points = min(20.0, (online_seconds / (8 * 3600)) * 20)
-    score = round(target_points + invasion_points + online_points, 1)
-
-    return {
-        "member": member,
-        "messages": messages,
-        "target": target,
-        "target_percent": min(100, round((messages / target) * 100)),
-        "accepted": accepted,
-        "ejected": ejected,
-        "online_seconds": online_seconds,
-        "target_points": round(target_points, 1),
-        "invasion_points": round(invasion_points, 1),
-        "online_points": round(online_points, 1),
-        "score": score,
-    }
-
-
-class Management(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.online_flush_task.start()
 
-    def cog_unload(self):
-        self.online_flush_task.cancel()
-
-    async def _update_presence(
-        self,
-        member: discord.Member,
-        status: discord.Status,
-    ) -> None:
-        if member.bot or not member.guild:
-            return
-        cfg = get_scfg(member.guild.id)
-        role = _staff_role(member.guild, cfg)
-        if not role or role not in member.roles:
-            return
-
-        date_key = _today()
-        now = datetime.now(timezone.utc)
-        entries = cfg.setdefault("online_time", {}).setdefault(date_key, {})
-        entry = entries.setdefault(str(member.id), {"total_seconds": 0, "active_since": None})
-        currently_active = bool(entry.get("active_since"))
-        should_be_active = _active_now(status)
-
-        if should_be_active and not currently_active:
-            entry["active_since"] = now.isoformat()
-        elif not should_be_active and currently_active:
-            active_since = _parse_timestamp(entry.get("active_since"))
-            if active_since:
-                entry["total_seconds"] = int(entry.get("total_seconds", 0)) + max(
-                    0, int((now - active_since).total_seconds())
-                )
-            entry["active_since"] = None
-        set_scfg(member.guild.id, cfg)
-
-    @commands.Cog.listener()
-    async def on_presence_update(self, before: discord.Member, after: discord.Member):
-        if before.status != after.status:
-            await self._update_presence(after, after.status)
-
-    @commands.Cog.listener()
-    async def on_ready(self):
-        """Start sessions for staff who were already active at bot startup."""
-        for guild in self.bot.guilds:
-            cfg = get_scfg(guild.id)
-            role = _staff_role(guild, cfg)
-            if not role:
-                continue
-            now = datetime.now(timezone.utc)
-            date_key = now.date().isoformat()
-            entries = cfg.setdefault("online_time", {}).setdefault(date_key, {})
-            changed = False
-            for member in role.members:
-                if member.bot or not _active_now(member.status):
-                    continue
-                entry = entries.setdefault(
-                    str(member.id),
-                    {"total_seconds": 0, "active_since": None},
-                )
-                if not entry.get("active_since"):
-                    entry["active_since"] = now.isoformat()
-                    changed = True
-            if changed:
-                set_scfg(guild.id, cfg)
-
-    @tasks.loop(minutes=1)
-    async def online_flush_task(self):
-        now = datetime.now(timezone.utc)
-        date_key = now.date().isoformat()
-        for guild in self.bot.guilds:
-            cfg = get_scfg(guild.id)
-            if cfg.get("online_time", {}).get(date_key):
-                _flush_online_sessions(cfg, date_key, now)
-                set_scfg(guild.id, cfg)
-
-    @online_flush_task.before_loop
-    async def before_online_flush_task(self):
-        await self.bot.wait_until_ready()
-
-    @commands.command(
-        name="performance",
-        help="Show the staff leaderboard or one staff member. Usage: !performance [@user]",
+    @app_commands.command(
+        name="receipt",
+        description="Record receipt details and attach an uploaded or linked bill image.",
     )
-    @commands.has_permissions(manage_guild=True)
-    async def performance(
+    @app_commands.describe(
+        customer="Select the customer user",
+        plan="Plan name or description",
+        price="Listed plan price in dollars",
+        discount="Discount amount in dollars",
+        invoice_id="Invoice ID shown on the receipt",
+        final_price="Final amount charged in dollars",
+        real_price="Real price before discount in dollars",
+        addons="Addon names or details, separated by commas",
+        bill_image="Upload the bill image",
+        bill_image_url="Link to the bill image instead of uploading it",
+        delivery_type="Where to deliver the receipt",
+        status="Payment status, for example PAID",
+    )
+    @app_commands.choices(delivery_type=DELIVERY_CHOICES)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def receipt(
         self,
-        ctx: commands.Context,
-        member: discord.Member = None,
+        interaction: discord.Interaction,
+        customer: discord.Member,
+        plan: str,
+        price: float,
+        discount: float,
+        invoice_id: str,
+        final_price: float,
+        real_price: float,
+        addons: str = "None",
+        bill_image: discord.Attachment = None,
+        bill_image_url: str = "",
+        delivery_type: app_commands.Choice[str] = None,
+        status: str = "PAID",
     ):
-        if not ctx.guild:
-            return await ctx.send("This command must be used inside a server.")
+        await interaction.response.defer(ephemeral=True)
 
-        cfg = get_scfg(ctx.guild.id)
-        role = _staff_role(ctx.guild, cfg)
-        if not role:
-            return await ctx.send(
-                embed=discord.Embed(
-                    title="Staff Role Required",
-                    description="Configure the normal staff role first with `!staff_role @role`.",
-                    color=WARNING,
-                )
-            )
-
-        now = datetime.now(timezone.utc)
-        date_key = _today()
-        _flush_online_sessions(cfg, date_key, now)
-        set_scfg(ctx.guild.id, cfg)
-
-        members = [item for item in role.members if not item.bot]
-        if member:
-            if member.bot or member not in members:
-                return await ctx.send(
-                    embed=discord.Embed(
-                        title="Not a Staff Member",
-                        description=f"{member.mention} is not in the configured staff role {role.mention}.",
-                        color=DANGER,
-                    )
-                )
-            stats = _metrics(cfg, member, date_key, now)
-            embed = discord.Embed(
-                title=f"Performance — {member.display_name}",
-                description=(
-                    f"Daily performance breakdown for {date_key}.\n"
-                    "Score: **50 target + 30 invasion + 20 online points**."
-                ),
-                color=SUCCESS,
-                timestamp=now,
-            )
-            embed.set_thumbnail(url=member.display_avatar.url)
-            embed.add_field(
-                name="Target Progress",
-                value=(
-                    f"**{stats['messages']} / {stats['target']} messages** "
-                    f"({stats['target_percent']}%)\n"
-                    f"Points: **{stats['target_points']} / 50**"
-                ),
-                inline=False,
-            )
-            embed.add_field(
-                name="Invasion Decisions",
-                value=(
-                    f"Accepted: **{stats['accepted']}**\n"
-                    f"Ejected: **{stats['ejected']}**\n"
-                    f"Points: **{stats['invasion_points']} / 30**"
-                ),
-                inline=True,
-            )
-            embed.add_field(
-                name="Online Time",
-                value=(
-                    f"**{_format_duration(stats['online_seconds'])}**\n"
-                    f"Points: **{stats['online_points']} / 20**"
-                ),
-                inline=True,
-            )
-            embed.add_field(name="Total Score", value=f"**{stats['score']} / 100**", inline=False)
-            embed.set_footer(text=f"Nexora Cloud • Staff Performance • {role.name}")
-            return await ctx.send(embed=embed)
-
-        leaderboard = sorted(
-            (_metrics(cfg, item, date_key, now) for item in members),
-            key=lambda item: (-item["score"], -item["messages"], item["member"].display_name.casefold()),
+        inv_id = invoice_id.strip()
+        plan_text = plan.strip()
+        link_text = bill_image_url.strip()
+        cashier_name = interaction.user.display_name
+        delivery_value = delivery_type.value if delivery_type else "admin_channel"
+        delivery_label = next(
+            (choice.name for choice in DELIVERY_CHOICES if choice.value == delivery_value),
+            "Admin DM + Channel",
         )
-        if not leaderboard:
-            return await ctx.send(
-                embed=discord.Embed(
-                    title="Staff Performance Leaderboard",
-                    description=f"No members are assigned to {role.mention}.",
-                    color=WARNING,
-                )
+
+        if not inv_id:
+            return await interaction.followup.send("Invoice ID cannot be empty.", ephemeral=True)
+        if not plan_text:
+            return await interaction.followup.send("Plan cannot be empty.", ephemeral=True)
+        if min(price, discount, final_price, real_price) < 0:
+            return await interaction.followup.send(
+                "Price values cannot be negative.",
+                ephemeral=True,
+            )
+        if bill_image and link_text:
+            return await interaction.followup.send(
+                "Provide either an uploaded bill image or a bill image link, not both.",
+                ephemeral=True,
+            )
+        if not bill_image and not link_text:
+            return await interaction.followup.send(
+                "You must upload a bill image or provide a bill image link.",
+                ephemeral=True,
+            )
+        if bill_image and not _attachment_is_image(bill_image):
+            return await interaction.followup.send(
+                "The uploaded file must be an image.",
+                ephemeral=True,
+            )
+        if link_text and not _valid_http_url(link_text):
+            return await interaction.followup.send(
+                "Bill image link must be a valid http:// or https:// URL.",
+                ephemeral=True,
             )
 
-        lines = []
-        for index, stats in enumerate(leaderboard[:25], start=1):
-            member = stats["member"]
-            lines.append(
-                f"`#{index}` {member.mention} — **{stats['score']} / 100**\n"
-                f" Target: {stats['messages']}/{stats['target']} • "
-                f"Invades: {stats['accepted']} accepted / {stats['ejected']} ejected • "
-                f"Online: {_format_duration(stats['online_seconds'])}"
-            )
-
-        embed = discord.Embed(
-            title="Staff Performance Leaderboard",
-            description=(
-                f"Daily ranking for **{date_key}** • Role: {role.mention}\n"
-                "Score weights: target **50%**, invasions **30%**, online time **20%**.\n\n"
-                + "\n".join(lines)
-            ),
-            color=SUCCESS,
-            timestamp=now,
+        bill_url = bill_image.url if bill_image else link_text
+        addon_text = addons.strip() or "None"
+        summary = _summary_embed(
+            inv_id,
+            customer,
+            cashier_name,
+            plan_text,
+            price,
+            discount,
+            real_price,
+            final_price,
+            addon_text,
+            delivery_label,
+            status.strip() or "PAID",
+            bill_url,
         )
-        embed.set_footer(text="Use !performance @user for an individual breakdown.")
-        await ctx.send(embed=embed)
 
-    async def cog_command_error(self, ctx: commands.Context, error: commands.CommandError):
-        if isinstance(error, commands.MissingPermissions):
-            await ctx.send("Error: You need Manage Server permission to use `!performance`.")
-        elif isinstance(error, commands.BadArgument):
-            await ctx.send("Error: Mention a valid server member.")
+        async def send_to_user(user: discord.User | discord.Member):
+            try:
+                await user.send(embed=summary)
+            except discord.Forbidden:
+                await interaction.followup.send(
+                    f"Could not DM {user.mention}. Receipt posted here instead.",
+                    ephemeral=True,
+                )
+                await interaction.channel.send(embed=summary)
+
+        async def post_in_channel(channel):
+            await channel.send(embed=summary)
+
+        if delivery_value == "admin_dm":
+            await interaction.user.send(embed=summary)
+            destination = "your DM"
+        elif delivery_value == "channel":
+            await post_in_channel(interaction.channel)
+            destination = "this channel"
+        elif delivery_value == "customer_dm":
+            await send_to_user(customer)
+            destination = f"{customer.mention}'s DM"
+        elif delivery_value == "admin_channel":
+            await interaction.user.send(embed=summary)
+            await post_in_channel(interaction.channel)
+            destination = "your DM and this channel"
+        elif delivery_value == "all":
+            await send_to_user(customer)
+            await interaction.user.send(embed=summary)
+            await post_in_channel(interaction.channel)
+            destination = "the customer, your DM, and this channel"
         else:
-            await ctx.send(f"Performance error: `{error}`")
+            await interaction.user.send(embed=summary)
+            await post_in_channel(interaction.channel)
+            destination = "your DM and this channel"
+
+        await interaction.followup.send(
+            f"Receipt recorded and delivered to {destination}. "
+            f"Invoice `{inv_id}` — Final price: **${final_price:,.2f}**",
+            ephemeral=True,
+        )
+
+    @receipt.error
+    async def receipt_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ):
+        message = (
+            "Error: You need Administrator permission."
+            if isinstance(error, app_commands.MissingPermissions)
+            else f"Error: `{error}`"
+        )
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(Management(bot))
+    await bot.add_cog(Receipt(bot))
