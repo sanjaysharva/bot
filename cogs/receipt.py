@@ -31,7 +31,7 @@ GOLD_EMBED = 0xF59E0B
 
 
 def _load_fonts():
-    """Load a clean sans-serif font."""
+    """Load a clean sans-serif font with a safe runtime fallback."""
     candidates = [
         "C:/Windows/fonts/arial.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -40,20 +40,24 @@ def _load_fonts():
         "/usr/share/fonts/truetype/arial.ttf",
         "arial.ttf",
     ]
-    path = None
-    for c in candidates:
-        if os.path.exists(c):
-            path = c
-            break
-    if not path:
-        path = candidates[1]
-    return {
-        "h1": ImageFont.truetype(path, 32),
-        "h2": ImageFont.truetype(path, 22),
-        "reg": ImageFont.truetype(path, 17),
-        "sm": ImageFont.truetype(path, 14),
-        "xs": ImageFont.truetype(path, 12),
-    }
+    sizes = {"h1": 32, "h2": 22, "reg": 17, "sm": 14, "xs": 12}
+
+    # A path may exist but still be unreadable by Pillow in a minimal
+    # container, so try every candidate instead of trusting its existence.
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            return {
+                name: ImageFont.truetype(path, size)
+                for name, size in sizes.items()
+            }
+        except (OSError, IOError):
+            continue
+
+    # Pillow's built-in font is always available when no system font exists.
+    fallback = ImageFont.load_default()
+    return {name: fallback for name in sizes}
 
 
 def _draw_hexagon(draw, cx, cy, radius, color, outline=None):
