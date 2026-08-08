@@ -90,7 +90,7 @@ async def tickets(
     interaction: discord.Interaction,
     category: discord.CategoryChannel,
     name: str,
-    channel: discord.TextChannel
+    channel: discord.abc.GuildChannel
 ):
     # Count channels currently inside the category
     count = len(category.channels) + 1
