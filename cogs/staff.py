@@ -489,15 +489,15 @@ class Staff(commands.Cog):
         set_scfg(ctx.guild.id, cfg)
         await ctx.send(embed=_embed("✅ Sales Role Set", f"Only administrators and {role.mention} can use `!invade`.", SUCCESS))
 
-    @commands.command(name="invade", help="Announce a server invasion decision. Usage: !invade <serverlink> <owneruserid> <accept|eject>")
+    @commands.command(name="invade", help="Announce a server invasion decision. Usage: !invade <serverlink> <owneruserid> <accept|reject>")
     async def invade(self, ctx: commands.Context, server_link: str, owner_user_id: int, decision: str):
         cfg = get_scfg(ctx.guild.id)
         role = ctx.guild.get_role(int(cfg.get("sales_role_id", 0))) if cfg.get("sales_role_id") else None
         if not ctx.author.guild_permissions.administrator and not (role and role in ctx.author.roles):
             return await ctx.send(embed=_embed("🚫 Access Denied", "Only administrators or the configured sales representative role can use `!invade`.", DANGER))
         decision = decision.lower()
-        if decision not in {"accept", "eject"}:
-            return await ctx.send(embed=_embed("⚠️ Invalid Decision", "Use either `accept` or `eject`.", WARNING))
+        if decision not in {"accept", "reject"}:
+            return await ctx.send(embed=_embed("⚠️ Invalid Decision", "Use either `accept` or `reject`.", WARNING))
         channel = ctx.guild.get_channel(int(cfg.get("sales_channel_id", 0))) if cfg.get("sales_channel_id") else None
         if not channel:
             return await ctx.send(embed=_embed("⚠️ Sales Channel Required", "Set it first with `!sales_representativechannel #channel`.", WARNING))
@@ -507,9 +507,9 @@ class Staff(commands.Cog):
         except (discord.NotFound, discord.HTTPException):
             owner_name = f"Unknown owner (`{owner_user_id}`)"
         accepted = decision == "accept"
-        result = "accepted" if accepted else "ejected"
+        result = "accepted" if accepted else "rejected"
         announcement = _embed(
-            f"{'✅' if accepted else '⛔'} Server Invasion {'Accepted' if accepted else 'Ejected'}",
+            f"{'✅' if accepted else '⛔'} Server Invasion {'Accepted' if accepted else 'Rejected'}",
             f"**{ctx.author.mention}** has {result} this server invasion.",
             SUCCESS if accepted else DANGER,
         )
