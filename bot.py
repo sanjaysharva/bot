@@ -117,40 +117,34 @@ async def tickets(
 # /customer
 # =========================
 
-@bot.tree.command(name="customer", description="Create multiple customer channels")
+@bot.tree.command(name="customer", description="Rename a channel with a custom number")
 @app_commands.describe(
-    channel="Category where channels will be created",
-    name="Base name for the channels",
-    no="Number of channels to create"
+    channel="Channel to rename",
+    name="New channel name",
+    no="Number to add to the name"
 )
 @app_commands.checks.has_permissions(manage_channels=True)
 async def customer(
     interaction: discord.Interaction,
     channel: discord.abc.GuildChannel,
     name: str,
-    no: app_commands.Range[int, 1, 50]
+    no: app_commands.Range[int, 1, 999999]
 ):
-    await interaction.response.defer(ephemeral=True)
+    new_name = f"{name}-{no}"
 
-    created = []
+    try:
+        await channel.edit(name=new_name)
 
-    # Start after existing channels
-    start_count = len(channel.channels) + 1
-
-    for i in range(no):
-        channel_name = f"{name}-{start_count + i}"
-
-        new_channel = await channel.create_text_channel(
-            name=channel_name
+        await interaction.response.send_message(
+            f"✅ Renamed channel to **{new_name}**",
+            ephemeral=True
         )
 
-        created.append(new_channel.mention)
-
-    await interaction.followup.send(
-        f"✅ Created **{len(created)}** customer channels:\n"
-        + "\n".join(created),
-        ephemeral=True
-    )
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "❌ I don't have permission to rename that channel.",
+            ephemeral=True
+        )
 # =========================
 # /lock
 # =========================
