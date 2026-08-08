@@ -96,7 +96,7 @@ async def tickets(
     count = len(category.channels) + 1
 
     # New channel name
-    new_name = f"{name}-{count}"
+    new_name = f"{name} {count}"
 
     try:
         await channel.edit(name=new_name)
