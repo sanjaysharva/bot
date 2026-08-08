@@ -126,7 +126,7 @@ async def tickets(
 @app_commands.checks.has_permissions(manage_channels=True)
 async def customer(
     interaction: discord.Interaction,
-    channel: discord.CategoryChannel,
+    channel: discord.abc.GuildChannel,
     name: str,
     no: app_commands.Range[int, 1, 50]
 ):
