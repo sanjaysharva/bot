@@ -75,7 +75,76 @@ async def clear(
         ephemeral=True
     )
 
+# =========================
+# /tickets
+# =========================
 
+@bot.tree.command(name="tickets", description="Create a numbered ticket channel")
+@app_commands.describe(
+    category="Category where the channel will be created",
+    name="Base name for the channel",
+    channel="Channel to use as the category"
+)
+@app_commands.checks.has_permissions(manage_channels=True)
+async def tickets(
+    interaction: discord.Interaction,
+    category: discord.CategoryChannel,
+    name: str,
+    channel: discord.TextChannel
+):
+    # Count channels currently inside the category
+    count = len(category.channels) + 1
+
+    channel_name = f"{name}-{count}"
+
+    new_channel = await category.create_text_channel(
+        name=channel_name
+    )
+
+    await interaction.response.send_message(
+        f"✅ Created {new_channel.mention}",
+        ephemeral=True
+    )
+
+
+# =========================
+# /customer
+# =========================
+
+@bot.tree.command(name="customer", description="Create multiple customer channels")
+@app_commands.describe(
+    channel="Category where channels will be created",
+    name="Base name for the channels",
+    no="Number of channels to create"
+)
+@app_commands.checks.has_permissions(manage_channels=True)
+async def customer(
+    interaction: discord.Interaction,
+    channel: discord.CategoryChannel,
+    name: str,
+    no: app_commands.Range[int, 1, 50]
+):
+    await interaction.response.defer(ephemeral=True)
+
+    created = []
+
+    # Start after existing channels
+    start_count = len(channel.channels) + 1
+
+    for i in range(no):
+        channel_name = f"{name}-{start_count + i}"
+
+        new_channel = await channel.create_text_channel(
+            name=channel_name
+        )
+
+        created.append(new_channel.mention)
+
+    await interaction.followup.send(
+        f"✅ Created **{len(created)}** customer channels:\n"
+        + "\n".join(created),
+        ephemeral=True
+    )
 # =========================
 # /lock
 # =========================
