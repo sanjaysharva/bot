@@ -79,11 +79,11 @@ async def clear(
 # /tickets
 # =========================
 
-@bot.tree.command(name="tickets", description="Create a numbered ticket channel")
+@bot.tree.command(name="tickets", description="Rename a channel using a category count")
 @app_commands.describe(
-    category="Category where the channel will be created",
-    name="Base name for the channel",
-    channel="Channel to use as the category"
+    category="Category used only for counting channels",
+    name="New base name",
+    channel="Channel to rename"
 )
 @app_commands.checks.has_permissions(manage_channels=True)
 async def tickets(
@@ -92,20 +92,26 @@ async def tickets(
     name: str,
     channel: discord.abc.GuildChannel
 ):
-    # Count channels currently inside the category
+    # Count channels inside the selected category
     count = len(category.channels) + 1
 
-    channel_name = f"{name}-{count}"
+    # New channel name
+    new_name = f"{name}-{count}"
 
-    new_channel = await category.create_text_channel(
-        name=channel_name
-    )
+    try:
+        await channel.edit(name=new_name)
 
-    await interaction.response.send_message(
-        f"✅ Created {new_channel.mention}",
-        ephemeral=True
-    )
+        await interaction.response.send_message(
+            f"✅ Renamed {channel.mention} to **{new_name}**\n"
+            f"📁 Counted from category: **{category.name}**",
+            ephemeral=True
+        )
 
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "❌ I don't have permission to rename that channel.",
+            ephemeral=True
+        )
 
 # =========================
 # /customer
